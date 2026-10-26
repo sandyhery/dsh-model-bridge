@@ -1,0 +1,312 @@
+#!/usr/bin/env node
+/**
+ * bridge CLI —— dsh-model-bridge 的账号观测与诊断出口。
+ *
+ * 对齐 dsh-workbuddy-connect 0.7.9 的 `status / doctor / logout` 能力，
+ * 但形态是四渠道统一的：
+ *
+ *   bridge status            各渠道登录态 / token 有效期 / 模型数（不碰上游，秒回）
+ *   bridge credits           WorkBuddy 各账号余额（billing 接口，真实计费查询）
+ *   bridge quota             Qoder 账号用量（OpenAPI，免费账号也有）
+ *   bridge doctor            凭据文件 / Electron 可达性 / 目录来源诊断
+ *   bridge logout <slot>     清掉插件自有副本（桌面 App 登录不受影响）
+ *
+ * 设计约束：**只读**。除 logout 外不写任何文件；不带 --json 时输出人读格式。
+ */
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+
+const DSH_HOME = process.env.DSH_HOME?.trim() || join(process.env.HOME ?? homedir(), '.dsh');
+const AUTH_DIR = join(DSH_HOME, 'connect-auth');
+const JSON_OUT = process.argv.includes('--json');
+const args = process.argv.slice(2).filter((a) => a !== '--json');
+const cmd = args[0] ?? 'status';
+const target = args[1];
+
+const wb = await import('../vendor/providers/workbuddy/index.js');
+const variants = await import('../vendor/providers/workbuddy/variants-CnrmSn0Q.js');
+const variantFor = variants.i ?? ((id) => (variants.WORKBUDDY_VARIANTS ?? []).find((v) => v.id === id));
+
+function out(value) {
+  console.log(JSON.stringify(value, null, 2));
+}
+
+/** readSnapshot：与 src/channels.mjs 同一判定（桌面格式 / 自有副本格式）。 */
+function readSnapshot(path) {
+  if (!existsSync(path)) return undefined;
+  try {
+    const doc = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof doc?.auth?.accessToken === 'string') return { kind: 'desktop', doc };
+    if (typeof doc?.credential?.accessToken === 'string') return { kind: 'own', doc };
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function expiryLabel(ms) {
+  if (!ms || ms <= 0) return 'unknown';
+  const d = new Date(ms);
+  const days = Math.round((ms - Date.now()) / 86400000);
+  return `${d.toISOString().slice(0, 10)}（${days >= 0 ? `${days} 天后` : `已过期 ${-days} 天`}）`;
+}
+
+/** 每个 workbuddy 槽位构造一个 store（与 src/channels.mjs 同一套规则）。 */
+function workbuddyStores() {
+  const out = [];
+  for (const id of ['workbuddy1', 'workbuddy2', 'workbuddy3', 'workbuddy4']) {
+    const variant = variantFor(id);
+    if (variant === undefined) continue;
+    const explicit = join(AUTH_DIR, `${id}.json`);
+    const snap = readSnapshot(explicit);
+    const client = new wb.WorkBuddyUpstreamClient();
+    const store = new wb.WorkBuddyCredentialStore({
+      variant,
+      ...(snap?.kind === 'desktop' ? { desktopPath: explicit } : {}),
+      ...(snap?.kind === 'own' ? { ownPath: explicit } : {}),
+      refresh: (credential) => client.refreshToken(credential),
+    });
+    out.push({ id, variant, store, client, snapshot: snap });
+  }
+  return out;
+}
+
+function snapshotSummary(id, snap) {
+  if (snap === undefined) return { slot: id, snapshot: 'absent' };
+  const doc = snap.doc;
+  const auth = snap.kind === 'desktop' ? doc.auth : doc.credential;
+  return {
+    slot: id,
+    snapshot: snap.kind,
+    account: doc.account?.nickname ?? doc.credential?.nickname ?? doc.name ?? '',
+    domain: auth.domain ?? doc.credential?.domain ?? '',
+    accessTokenExpiresAt: expiryLabel(
+      snap.kind === 'desktop' ? auth.expiresAt : doc.credential?.expiresAtMs,
+    ),
+  };
+}
+
+// ── status ────────────────────────────────────────────────────────────────
+
+async function status() {
+  const rows = [];
+
+  // WorkBuddy 变体
+  for (const { id, store, snapshot } of workbuddyStores()) {
+    const st = await store.status();
+    const ss = snapshotSummary(id, snapshot);
+    rows.push({
+      channel: id,
+      state: st.state,
+      account: st.nickname ?? ss.account ?? '',
+      tokenExpiresAt: st.expiresAtMs ? expiryLabel(st.expiresAtMs) : undefined,
+      reason: st.reason,
+      snapshot: snapshotSummary(id, snapshot).snapshot,
+    });
+  }
+
+  // Qoder 槽位（与 src/channels.mjs 同一发现规则）
+  for (const suffix of ['', '-2', '-3', '-4', '-5']) {
+    const file = join(AUTH_DIR, `qoder-session${suffix}.json`);
+    if (!existsSync(file)) continue;
+    let doc;
+    try { doc = JSON.parse(readFileSync(file, 'utf8')); } catch { continue; }
+    rows.push({
+      channel: `qoder${suffix === '' ? '' : suffix.slice(1)}`,
+      state: typeof doc?.token === 'string' && doc.token ? 'signed-in' : 'invalid',
+      account: doc.name ?? doc.email ?? '',
+      tokenExpiresAt: doc.expiresAt ? expiryLabel(Date.parse(doc.expiresAt) || 0) : undefined,
+      snapshot: 'session',
+    });
+  }
+
+  // Trae
+  const traeFile = join(AUTH_DIR, 'trae.json');
+  if (existsSync(traeFile)) {
+    try {
+      const doc = JSON.parse(readFileSync(traeFile, 'utf8'));
+      // trae.json 的 account 可能是字符串也可能是 {nickname/email} 对象（导出器版本差异）
+      const acct = typeof doc.account === 'string' ? doc.account
+        : doc.account?.username ?? doc.account?.nickname ?? doc.account?.email ?? doc.userId ?? '';
+      const exp = doc.expiredAt ?? doc.expiresAt;
+      rows.push({ channel: 'trae', state: 'signed-in', account: acct, tokenExpiresAt: exp ? expiryLabel(Date.parse(exp) || 0) : undefined, snapshot: 'session' });
+    } catch { /* fallthrough */ }
+  }
+
+  if (JSON_OUT) return out({ status: rows });
+  for (const r of rows) {
+    const line = `${r.channel.padEnd(12)} ${String(r.state).padEnd(11)} ${String(r.account ?? '').padEnd(28)} ${r.tokenExpiresAt ?? ''}`;
+    console.log(line.trimEnd() + (r.reason ? `  ← ${r.reason}` : ''));
+  }
+}
+
+// ── credits（WorkBuddy billing 真实查询）─────────────────────────────────
+
+async function credits() {
+  const rows = [];
+  for (const { id, store, client, snapshot } of workbuddyStores()) {
+    const st = await store.status();
+    if (st.state !== 'signed-in') {
+      rows.push({ channel: id, state: st.state, reason: st.reason });
+      continue;
+    }
+    const credential = await store.current();
+    try {
+      const credits = await client.fetchCredits(credential);
+      rows.push({ channel: id, account: st.nickname ?? '', state: 'signed-in', credits });
+    } catch (error) {
+      rows.push({ channel: id, state: 'signed-in', creditsError: String(error.message ?? error).slice(0, 300) });
+    }
+  }
+  if (JSON_OUT) return out({ credits: rows });
+  for (const r of rows) {
+    if (r.credits !== undefined) {
+      // credits 形状：{total, accounts:[{packageName, remain, size}]} 或字符串
+      const c = r.credits;
+      const text = typeof c === 'string' ? c
+        : typeof c.total === 'number'
+          ? `${c.total} 积分（${(c.accounts ?? []).filter(a => a.remain > 0).length} 个有效包）`
+          : JSON.stringify(c).slice(0, 80);
+      console.log(`${r.channel.padEnd(12)} ${String(r.account).padEnd(28)} ${text}`);
+    }
+    else console.log(`${r.channel.padEnd(12)} ${r.state}${r.creditsError ? `  ← ${r.creditsError}` : r.reason ? `  ← ${r.reason}` : ''}`);
+  }
+}
+
+// ── quota（Qoder OpenAPI 用量）───────────────────────────────────────────
+
+async function quota() {
+  const qoder = await import('../vendor/providers/qoder/index.js');
+  const rows = [];
+  for (const suffix of ['', '-2', '-3', '-4', '-5']) {
+    const file = join(AUTH_DIR, `qoder-session${suffix}.json`);
+    if (!existsSync(file)) continue;
+    const id = `qoder${suffix === '' ? '' : suffix.slice(1)}`;
+    const cfg = () => ({ sessionFile: file });
+    try {
+      const sessions = qoder.createSessionStore({ config: cfg });
+      const pats = qoder.createPatStore({ config: cfg });
+      const tokens = qoder.createTokenManager({ pats, sessions, config: cfg, logger: { info() {}, warn() {}, error() {}, debug() {} } });
+      const account = qoder.createQoderAccountClient({ tokens, config: cfg, logger: { info() {}, warn() {}, error() {}, debug() {} } });
+      const session = await sessions.current();
+      if (session === undefined) { rows.push({ channel: id, state: 'signed-out' }); continue; }
+      /**
+       * 必须传 token manager 的产物（cred.jobToken / cred.userID / cred.machineID），
+       * 不能传 sessions.current() 的原始会话 —— openApiHeaders 只认 credential.jobToken
+       * 字段，原始会话对象上这个字段是 undefined → Bearer undefined → 401 TOKEN_INVALID。
+       */
+      const credential = await tokens.get();
+      const quota = await account.fetchQuota(credential);
+      rows.push({ channel: id, state: 'signed-in', account: session.name ?? session.email, quota });
+    } catch (error) {
+      rows.push({ channel: id, state: 'error', reason: String(error.message ?? error).slice(0, 200) });
+    }
+  }
+  if (JSON_OUT) return out({ quota: rows });
+  for (const r of rows) {
+    const q = r.quota;
+    const qText = q
+      ? q.unlimited ? 'unlimited'
+        : `used ${q.used ?? '?'}/${q.total ?? '?'}${q.percentage !== undefined ? ` (${Math.round(q.percentage * 100)}%)` : ''}`
+      : r.reason ?? '';
+    console.log(`${r.channel.padEnd(12)} ${String(r.state).padEnd(11)} ${String(r.account ?? '').padEnd(34)} ${qText}`);
+  }
+}
+
+// ── doctor ───────────────────────────────────────────────────────────────
+
+async function doctor() {
+  const report = {
+    dshHome: DSH_HOME,
+    node: process.version,
+    checks: [],
+  };
+  const add = (name, ok, detail) => report.checks.push({ name, ok, detail });
+
+  // 1. 凭据目录
+  add('connect-auth dir', existsSync(AUTH_DIR), AUTH_DIR);
+
+  // 2. 每份快照可解析
+  for (const f of existsSync(AUTH_DIR) ? ['qoder-session.json', 'qoder-session-2.json', 'trae.json', 'workbuddy1.json', 'workbuddy4.json'] : []) {
+    const p = join(AUTH_DIR, f);
+    if (!existsSync(p)) { add(`snapshot ${f}`, true, 'absent (optional)'); continue; }
+    let doc;
+    try { doc = JSON.parse(readFileSync(p, 'utf8')); }
+    catch { add(`snapshot ${f}`, false, 'invalid JSON'); continue; }
+    // 各渠道凭据形状不同：workbuddy 走 readSnapshot；qoder 认 {token,uid}；trae 认 {token,userId}
+    if (f.startsWith('qoder')) {
+      const ok = typeof doc?.token === 'string' && doc.token !== '' && typeof doc?.uid === 'string' && doc.uid !== '';
+      add(`snapshot ${f}`, ok, ok ? `qoder session (${doc.name ?? doc.email ?? doc.uid})` : 'missing token/uid');
+      continue;
+    }
+    if (f === 'trae.json') {
+      const ok = typeof doc?.token === 'string' && doc.token !== '' && doc?.userId !== undefined;
+      add(`snapshot ${f}`, ok, ok ? `trae credential (user ${doc.userId})` : 'missing token/userId');
+      continue;
+    }
+    const snap = readSnapshot(p);
+    add(`snapshot ${f}`, snap !== undefined, snap ? `format=${snap.kind}` : 'unparseable');
+  }
+
+  // 3. WorkBuddy 桌面 App 的 .info 文件与 Electron（信封解密依赖）
+  const infoDir = join(process.env.HOME ?? homedir(), 'Library/Application Support/CodeBuddyExtension/Data/Public/auth');
+  for (const f of ['workbuddy-desktop.info', 'workbuddy-desktop-ai.info']) {
+    add(`desktop ${f}`, existsSync(join(infoDir, f)), existsSync(join(infoDir, f)) ? 'present' : 'absent (ok if snapshot exists)');
+  }
+  const electron = '/Applications/WorkBuddy AI.app/Contents/MacOS/Electron';
+  add('WorkBuddy AI Electron', existsSync(electron), existsSync(electron) ? electron : 'not found — needed only for envelope re-decryption on macOS');
+
+  // 4. 目录来源（起一次 catalog 判 live/saved/fallback）
+  try {
+    const qoder = await import('../vendor/providers/qoder/index.js');
+    const cfg = () => ({});
+    const tokens = qoder.createTokenManager({
+      pats: qoder.createPatStore({ config: cfg }),
+      sessions: qoder.createSessionStore({ config: cfg }),
+      config: cfg, logger: { info() {}, warn() {}, error() {}, debug() {} },
+    });
+    const catalog = qoder.createCatalog({ tokens, config: cfg, logger: { info() {}, warn() {}, error() {}, debug() {} } });
+    await catalog.reload();
+    add('qoder catalog', catalog.current().length > 0, `source=${catalog.source?.()} models=${catalog.current().length}`);
+  } catch (error) {
+    add('qoder catalog', false, String(error.message ?? error).slice(0, 200));
+  }
+
+  if (JSON_OUT) return out(report);
+  console.log(`dsh-model-bridge doctor — node ${report.node} — DSH_HOME=${report.dshHome}`);
+  for (const c of report.checks) {
+    console.log(`  ${c.ok ? '✓' : '✗'} ${c.name.padEnd(28)} ${c.detail ?? ''}`);
+  }
+  const failed = report.checks.filter((c) => !c.ok).length;
+  console.log(`\n${failed === 0 ? 'all checks passed' : `${failed} check(s) failed`}`);
+  process.exitCode = failed === 0 ? 0 : 1;
+}
+
+// ── logout ───────────────────────────────────────────────────────────────
+
+function logout(slot) {
+  if (slot === undefined) { console.error('usage: bridge logout <workbuddy1|workbuddy4|qoder|qoder2>'); process.exitCode = 2; return; }
+  const candidates = [join(AUTH_DIR, `${slot}.json`), join(AUTH_DIR, `qoder-session${slot === 'qoder' ? '' : slot.replace('qoder', '')}.json`), join(DSH_HOME, `.${slot}-auth.json`)];
+  let removed = 0;
+  for (const p of candidates) {
+    if (existsSync(p)) { unlinkSync(p); console.log(`removed ${p}`); removed += 1; }
+  }
+  if (removed === 0) console.log(`no plugin-owned copy found for ${slot}（桌面 App 登录不受影响）`);
+}
+
+// ── main ─────────────────────────────────────────────────────────────────
+
+const usage = `usage: bridge <status|credits|quota|doctor|logout> [slot] [--json]`;
+try {
+  if (cmd === 'status') await status();
+  else if (cmd === 'credits') await credits();
+  else if (cmd === 'quota') await quota();
+  else if (cmd === 'doctor') await doctor();
+  else if (cmd === 'logout') logout(target);
+  else { console.error(usage); process.exitCode = 2; }
+} catch (error) {
+  console.error('bridge:', error?.stack ?? error);
+  process.exitCode = 1;
+}

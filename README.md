@@ -183,6 +183,26 @@ the upstream stores, and the bridge restart is the belt-and-braces step).
 Nothing account-related is stored in this repo: no tokens, no paths to your home
 directory, no account ids.
 
+## Account CLI (`bridge`)
+
+The bundled `bin/bridge` observes all channels without starting the gateway —
+the missing piece of `dsh-workbuddy-connect` 0.7.9's `status / doctor / logout`
+CLI, in a four-channel shape:
+
+```bash
+ln -sf "$PWD/bin/bridge" ~/.local/bin/bridge
+
+bridge status    # signed-in state, token expiry, per channel — no upstream call
+bridge credits   # WorkBuddy billing query (real metering API, per slot)
+bridge quota     # Qoder OpenAPI usage (used/total/percent)
+bridge doctor    # snapshots, Electron availability, catalog source — exit 1 on failure
+bridge logout workbuddy1   # remove the plugin-owned copy only
+```
+
+All commands accept `--json` for machine-readable output. Everything except
+`logout` is read-only. Credits/quota hit real metering endpoints — expect
+those calls to be metered by the vendor.
+
 ## Operations
 
 ```bash
