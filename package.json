@@ -1,0 +1,21 @@
+{
+  "name": "dsh-model-bridge",
+  "version": "1.0.0",
+  "description": "Bridge the free quota of WorkBuddy / Trae CN / Qoder CN into Codex (Responses), Claude Code (Anthropic Messages), and any OpenAI-compatible client",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "sandyhery",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandyhery/dsh-model-bridge.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-provider.mjs",
+    "start": "node src/bridge.mjs",
+    "up": "bash scripts/up.sh"
+  }
+}

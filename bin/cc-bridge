@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Claude Code 走 dsh-model-bridge 的启动器。
+#
+# 为什么不改 ~/.claude/settings.json：那份配置指向 EchoBird（MINIMAX），
+# 是日常默认。这里用环境变量覆盖，只在本次进程生效 —— 想回默认直接不用它。
+#
+# 用法：
+#   cc-bridge                        # 用默认模型（workbuddy4/deepseek-v4.1-flash）
+#   cc-bridge -p "你好"              # 其余参数原样传给 claude
+#   CC_MODEL=trae/glm-5.3-flash cc-bridge
+#   CC_MODEL=workbuddy1/deepseek-v4.1-flash cc-bridge -p "hi"
+set -euo pipefail
+
+BRIDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${BRIDGE_PORT:-18780}"
+TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(cat "$HOME/.dsh-model-bridge/token" 2>/dev/null || true)}"
+
+if [[ -z "$TOKEN" ]]; then
+  echo "找不到 bridge token：先跑 bash $BRIDGE_DIR/scripts/up.sh" >&2
+  exit 2
+fi
+
+if ! curl -sf -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+  echo "桥没起（127.0.0.1:$PORT 不通）：bash $BRIDGE_DIR/scripts/up.sh" >&2
+  exit 2
+fi
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
+export ANTHROPIC_AUTH_TOKEN="$TOKEN"
+export ANTHROPIC_MODEL="${CC_MODEL:-workbuddy4/deepseek-v4.1-flash}"
+# 桥的模型名不在 Claude Code 内置目录里，放开窗口校验（否则它会按 200k 假设自动压缩）
+export CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+exec claude "$@"

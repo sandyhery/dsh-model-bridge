@@ -1,0 +1,20 @@
+dsh-model-bridge
+Copyright (c) 2026 sandyhery
+
+This project vendors modified runtime components from:
+
+  dsh-workbuddy-trae-qoder-connect
+  https://github.com/chengshenyangtai/dsh-workbuddy-trae-qoder-connect
+  Copyright (c) chengshenyangtai — MIT License (see vendor/LICENSE)
+
+The vendored files under `vendor/` are an unmodified copy of the plugin's
+`lib/` directory (upstream commit pinned at sync time, recorded in
+`scripts/sync-provider.mjs`). They are redistributed under the terms of
+the upstream MIT license. All bridge-specific code lives in `src/`,
+`bin/`, and `scripts/`.
+
+This project is an independent integration harness. It is not
+affiliated with, endorsed by, or connected to Qoder, Trae (ByteDance),
+WorkBuddy / CodeBuddy (Tencent), or the coding assistant (DeepSeek).
+Users are responsible for complying with the terms of service of each
+upstream provider account they connect.

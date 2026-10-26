@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# 用 dsh-model-bridge 起 Codex（模型选择器里是桥的全部模型）。
+#
+# 为什么不改默认 codex：~/.codex/config.toml 的默认 provider 是 EchoBird（MiniMax），
+# 那是日常在用的一条。这里走 --profile bridge，只在本次生效。
+#
+# 用法：
+#   codex-bridge                       # 交互式，选择器里 83 个模型
+#   codex-bridge -m trae/glm-5.3-flash
+#   codex-bridge exec "解释这段代码"
+set -euo pipefail
+
+PORT="${BRIDGE_PORT:-18780}"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! curl -sf -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+  echo "桥没起（127.0.0.1:$PORT 不通）：bash $DIR/scripts/up.sh" >&2
+  exit 2
+fi
+
+export BRIDGE_API_KEY="${BRIDGE_API_KEY:-$(cat "$HOME/.dsh-model-bridge/token")}"
+exec codex --profile bridge "$@"

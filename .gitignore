@@ -1,0 +1,17 @@
+# 本机凭据与密钥 —— 永远不进仓库
+.env
+.env.*
+!.env.example
+*.token
+vendor/.token*
+
+# 依赖
+node_modules/
+
+# 运行产物
+*.log
+.docker/
+
+# vendor 可选入仓：默认提交（别人克隆即用），升级时用 scripts/sync-provider.mjs 刷新。
+# 如果不想跟上游走，取消下一行注释改为运行时拉取。
+# vendor/

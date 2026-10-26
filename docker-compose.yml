@@ -1,0 +1,27 @@
+# dsh-model-bridge —— 一条命令起桥
+#
+#   docker compose up -d
+#   cat ~/.dsh-model-bridge/token        # 客户端填这个当 api key
+#
+# 凭据**只读**挂载：容器改不了宿主的 App 登录态；token 由 BRIDGE_TOKEN 注入，
+# 容器内不落盘（/dsh 是 ro）。
+services:
+  bridge:
+    build: .
+    image: dsh-model-bridge:0.2.0
+    container_name: dsh-model-bridge
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18780:18780"
+    environment:
+      BRIDGE_HOST: "0.0.0.0"
+      BRIDGE_PORT: "18780"
+      DSH_HOME: "/dsh"
+      BRIDGE_DEBUG: "1"
+      BRIDGE_TOKEN: "${BRIDGE_TOKEN:?先执行 docker/model-bridge-token.sh 生成 token}"
+      # 容器读的是**已解密的明文快照**（~/.dsh/connect-auth/*.json），
+      # 不再挂 macOS 的 Electron：那个二进制是 Mach-O，Linux 容器里跑不起来，
+      # 设成 WORKBUDDY*_AUTH_FILE 反而会把可用的明文快照挡在门外。
+      # 快照过期时在宿主重跑 scripts/exports（见 README）。
+    volumes:
+      - "${HOME}/.dsh:/dsh:ro"
